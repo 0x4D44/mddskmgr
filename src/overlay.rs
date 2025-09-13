@@ -8,6 +8,7 @@ use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE};
 use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW, ULW_ALPHA,
     UpdateLayeredWindow,
@@ -191,6 +192,9 @@ impl Overlay {
             if let Err(e) = &ulw_res {
                 eprintln!("overlay: UpdateLayeredWindow failed: {e:?}");
             }
+
+            // Reassert topmost after painting without activating
+            let _ = SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
             // Cleanup
             SelectObject(mem_dc, old);

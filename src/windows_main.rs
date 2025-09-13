@@ -145,6 +145,15 @@ fn refresh_visibility_now() {
         });
         unsafe {
             let _ = ShowWindow(hwnd, if should_show { SW_SHOW } else { SW_HIDE });
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
         }
     }
 }
@@ -507,7 +516,7 @@ pub fn main() -> Result<()> {
         RegisterClassW(&wc);
 
         let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE((WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TOPMOST).0),
+            WINDOW_EX_STYLE((WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE).0),
             class_name,
             windows::core::w!(""),
             WS_POPUP,
