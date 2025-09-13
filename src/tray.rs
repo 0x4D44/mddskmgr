@@ -1,0 +1,169 @@
+use anyhow::{Result, anyhow};
+use std::mem::size_of;
+use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::UI::Shell::{
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
+};
+use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::PCWSTR;
+
+pub const TRAY_UID: u32 = 1;
+pub const TRAY_MSG: u32 = WM_APP + 1;
+
+pub const CMD_EDIT_TITLE: u16 = 1001;
+pub const CMD_EDIT_DESC: u16 = 1002;
+pub const CMD_TOGGLE: u16 = 1003;
+pub const CMD_OPEN_CONFIG: u16 = 1004;
+pub const CMD_EXIT: u16 = 1005;
+
+pub struct Tray {
+    pub nid: NOTIFYICONDATAW,
+}
+
+impl Tray {
+    pub fn new(hwnd: HWND, tip: &str) -> Result<Self> {
+        unsafe {
+            let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+            nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+            nid.hWnd = hwnd;
+            nid.uID = TRAY_UID;
+            nid.uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON;
+            nid.uCallbackMessage = TRAY_MSG;
+            // Load a stock application icon
+            nid.hIcon = LoadIconW(None, IDI_APPLICATION)?;
+            // Set tooltip
+            let mut wtip: Vec<u16> = tip.encode_utf16().collect();
+            wtip.push(0);
+            let lt = wtip.len().min(nid.szTip.len());
+            nid.szTip[..lt].copy_from_slice(&wtip[..lt]);
+            if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
+                return Err(anyhow!("Shell_NotifyIconW(NIM_ADD) failed"));
+            }
+            Ok(Self { nid })
+        }
+    }
+
+    pub fn remove_icon(&mut self) {
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_DELETE, &self.nid);
+        }
+    }
+
+    pub fn re_add(&mut self) {
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_ADD, &self.nid);
+        }
+    }
+
+    pub fn show_balloon(&mut self, title: &str, text: &str) {
+        unsafe {
+            self.nid.uFlags = NIF_INFO | NIF_TIP | NIF_MESSAGE | NIF_ICON;
+            let wtitle: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+            let wtext: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let lt = wtitle.len().min(self.nid.szInfoTitle.len());
+            self.nid.szInfoTitle[..lt].copy_from_slice(&wtitle[..lt]);
+            let li = wtext.len().min(self.nid.szInfo.len());
+            self.nid.szInfo[..li].copy_from_slice(&wtext[..li]);
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &self.nid);
+        }
+    }
+
+    pub fn show_menu(&self, hwnd: HWND) -> Result<()> {
+        unsafe {
+            let hmenu = CreatePopupMenu()?;
+            AppendMenuW(
+                hmenu,
+                MF_STRING,
+                CMD_EDIT_TITLE as usize,
+                PCWSTR(windows::core::w!("Edit Title").as_wide().as_ptr()),
+            )?;
+            AppendMenuW(
+                hmenu,
+                MF_STRING,
+                CMD_EDIT_DESC as usize,
+                PCWSTR(windows::core::w!("Edit Description").as_wide().as_ptr()),
+            )?;
+            AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null())?;
+            AppendMenuW(
+                hmenu,
+                MF_STRING,
+                CMD_TOGGLE as usize,
+                PCWSTR(windows::core::w!("Toggle Overlay").as_wide().as_ptr()),
+            )?;
+            AppendMenuW(
+                hmenu,
+                MF_STRING,
+                CMD_OPEN_CONFIG as usize,
+                PCWSTR(windows::core::w!("Open Config").as_wide().as_ptr()),
+            )?;
+            AppendMenuW(
+                hmenu,
+                MF_STRING,
+                CMD_EXIT as usize,
+                PCWSTR(windows::core::w!("Exit").as_wide().as_ptr()),
+            )?;
+
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = TrackPopupMenu(hmenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, None);
+            let _ = DestroyMenu(hmenu);
+        }
+        Ok(())
+    }
+
+    // Static helpers to avoid borrowing AppState across re-entrant shell calls
+    pub fn show_popup_menu(hwnd: HWND) -> Result<()> {
+        Self {
+            nid: unsafe { std::mem::zeroed() },
+        }
+        .show_menu(hwnd)
+    }
+
+    pub fn balloon_for(hwnd: HWND, title: &str, text: &str) -> Result<()> {
+        unsafe {
+            let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+            nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+            nid.hWnd = hwnd;
+            nid.uID = TRAY_UID;
+            nid.uFlags = NIF_INFO;
+            let wtitle: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+            let wtext: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let lt = wtitle.len().min(nid.szInfoTitle.len());
+            nid.szInfoTitle[..lt].copy_from_slice(&wtitle[..lt]);
+            let li = wtext.len().min(nid.szInfo.len());
+            nid.szInfo[..li].copy_from_slice(&wtext[..li]);
+            if !Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool() {
+                // In case the icon is missing (e.g., Explorer restart), re-add then modify.
+                nid.uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON | NIF_INFO;
+                nid.uCallbackMessage = TRAY_MSG;
+                nid.hIcon = LoadIconW(None, IDI_APPLICATION)?;
+                let tip = "Desktop Overlay";
+                let wtip: Vec<u16> = tip.encode_utf16().chain(std::iter::once(0)).collect();
+                let lt2 = wtip.len().min(nid.szTip.len());
+                nid.szTip[..lt2].copy_from_slice(&wtip[..lt2]);
+                let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn re_add_for(hwnd: HWND) -> Result<()> {
+        unsafe {
+            let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+            nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+            nid.hWnd = hwnd;
+            nid.uID = TRAY_UID;
+            nid.uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON;
+            nid.uCallbackMessage = TRAY_MSG;
+            nid.hIcon = LoadIconW(None, IDI_APPLICATION)?;
+            let tip = "Desktop Overlay";
+            let wtip: Vec<u16> = tip.encode_utf16().chain(std::iter::once(0)).collect();
+            let lt = wtip.len().min(nid.szTip.len());
+            nid.szTip[..lt].copy_from_slice(&wtip[..lt]);
+            let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+        }
+        Ok(())
+    }
+}
