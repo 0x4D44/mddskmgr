@@ -37,7 +37,7 @@ Name: "autostart"; Description: "Run at Windows startup"; Flags: checkedonce
 
 [Registry]
 ; HKCU Run entry for current user. Removed on uninstall.
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "DesktopLabeler"; ValueData: '"{app}\{#MyAppExeName}"'; Flags: uninsdeletevalue; Tasks: autostart
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "DesktopLabeler"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
 ; Clean up legacy key value if present
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "DesktopNameManager"; Flags: deletevalue uninsdeletevalue
 
