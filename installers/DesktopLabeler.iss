@@ -43,16 +43,3 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
-
-[Code]
-procedure InitializeWizard;
-var
-  hasRun: Boolean;
-begin
-  hasRun := RegValueExists(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'DesktopLabeler') or
-            RegValueExists(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'DesktopNameManager');
-  if hasRun then
-    WizardSelectTasks('autostart', True)
-  else
-    WizardSelectTasks('autostart', True); // default ON
-end;
