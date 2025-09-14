@@ -1,5 +1,5 @@
-# Inno Setup Script for Desktop Labeler (mddsklbl)
-# Build with: iscc installers\DesktopLabeler.iss
+; Inno Setup Script for Desktop Labeler (mddsklbl)
+; Build with: iscc installers\DesktopLabeler.iss
 
 #define MyAppName "Desktop Labeler"
 #define MyAppVersion "1.0.0"
