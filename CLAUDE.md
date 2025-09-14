@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Rust project called `mddskmgr` (version 0.1.0) using Rust edition 2024.
+This is a Rust project called `mddskmgr` (binary: `mddsklbl`, version 1.0.0) using Rust edition 2024.
 
 ## Common Development Commands
 
@@ -17,10 +17,10 @@ cargo build
 cargo build --release
 
 # Run the project
-cargo run
+cargo run --bin mddsklbl
 
 # Run with release optimizations
-cargo run --release
+cargo run --release --bin mddsklbl
 ```
 
 ### Code Quality

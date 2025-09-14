@@ -80,7 +80,7 @@ Together: the overlay shows only when Toggle=ON AND not High Contrast AND not Fu
 - Placement uses the primary monitor’s work area (excludes taskbar): centered horizontally, offset by `appearance.margin_px` from the top.
 
 ## Logging
-Logs are written to `%LOCALAPPDATA%\Acme\DesktopLabeler\logs\mddskmgr.YYYY-MM-DD.log`. Control verbosity with `RUST_LOG` (e.g., `RUST_LOG=info` or `RUST_LOG=debug`).
+Logs are written to `%LOCALAPPDATA%\Acme\DesktopLabeler\logs\mddsklbl.YYYY-MM-DD.log`. Control verbosity with `RUST_LOG` (e.g., `RUST_LOG=info` or `RUST_LOG=debug`).
 
 ## Troubleshooting
 - Overlay not visible
@@ -113,7 +113,7 @@ src/
 ```
 
 ## Security & Privacy
-- No elevated privileges required; writes only under your `%APPDATA%/Acme/DesktopOverlay` directory.
+- No elevated privileges required; writes only under your `%APPDATA%/Acme/DesktopLabeler` directory.
 - No network access or telemetry.
 
 ## Roadmap
