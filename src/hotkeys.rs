@@ -65,6 +65,7 @@ pub fn unregister(_hwnd: (), _id: i32) {}
 pub const HK_EDIT_TITLE: i32 = 1;
 pub const HK_EDIT_DESC: i32 = 2;
 pub const HK_TOGGLE: i32 = 3;
+pub const HK_SNAP: i32 = 4;
 
 // Utility: detect duplicates between hotkey chords (case-insensitive key, same modifiers).
 use crate::config::Hotkeys;
@@ -78,4 +79,7 @@ pub fn has_duplicates(hk: &Hotkeys) -> bool {
     same(&hk.edit_title, &hk.edit_description)
         || same(&hk.edit_title, &hk.toggle_overlay)
         || same(&hk.edit_description, &hk.toggle_overlay)
+        || same(&hk.edit_title, &hk.snap_position)
+        || same(&hk.edit_description, &hk.snap_position)
+        || same(&hk.toggle_overlay, &hk.snap_position)
 }

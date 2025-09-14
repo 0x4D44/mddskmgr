@@ -1,3 +1,4 @@
+pub mod autorun;
 pub mod config;
 pub mod core;
 pub mod hotkeys;

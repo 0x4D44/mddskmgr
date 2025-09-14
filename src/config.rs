@@ -21,6 +21,8 @@ pub struct Hotkeys {
     pub edit_title: KeyChord,
     pub edit_description: KeyChord,
     pub toggle_overlay: KeyChord,
+    #[serde(default = "default_snap_key")]
+    pub snap_position: KeyChord,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +38,8 @@ pub struct Appearance {
     pub font_family: String,
     pub font_size_dip: u32,
     pub margin_px: i32,
+    #[serde(default)]
+    pub hide_on_fullscreen: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -68,18 +72,34 @@ impl Default for Config {
                     shift: false,
                     key: "O".into(),
                 },
+                snap_position: KeyChord {
+                    ctrl: true,
+                    alt: true,
+                    shift: false,
+                    key: "L".into(),
+                },
             },
             appearance: Appearance {
                 font_family: "Segoe UI".into(),
                 font_size_dip: 16,
                 margin_px: 8,
+                hide_on_fullscreen: false,
             },
         }
     }
 }
 
+fn default_snap_key() -> KeyChord {
+    KeyChord {
+        ctrl: true,
+        alt: true,
+        shift: false,
+        key: "L".into(),
+    }
+}
+
 pub fn project_paths() -> Result<Paths> {
-    let dirs = ProjectDirs::from("com", "Acme", "DesktopOverlay")
+    let dirs = ProjectDirs::from("com", "Acme", "DesktopLabeler")
         .context("Failed to determine project directories")?;
     let cfg_dir = dirs.config_dir().to_path_buf();
     let cfg_file = cfg_dir.join("labels.json");
@@ -97,7 +117,22 @@ pub fn load_or_default() -> Result<(Config, Paths)> {
     fs::create_dir_all(&paths.log_dir).ok();
     let cfg = match fs::read_to_string(&paths.cfg_file) {
         Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-        Err(_) => Config::default(),
+        Err(_) => {
+            // Migrate from old app name if present
+            if let Some(old_dirs) = ProjectDirs::from("com", "Acme", "DesktopOverlay") {
+                let old_file = old_dirs.config_dir().join("labels.json");
+                if let Ok(s) = fs::read_to_string(&old_file) {
+                    let parsed: Config = serde_json::from_str(&s).unwrap_or_default();
+                    // Save to new location
+                    let _ = save_atomic(&parsed, &paths);
+                    parsed
+                } else {
+                    Config::default()
+                }
+            } else {
+                Config::default()
+            }
+        }
     };
     Ok((cfg, paths))
 }

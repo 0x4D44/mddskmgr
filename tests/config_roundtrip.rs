@@ -31,11 +31,18 @@ fn save_and_load_roundtrip() {
             shift: false,
             key: "O".into(),
         },
+        snap_position: KeyChord {
+            ctrl: true,
+            alt: true,
+            shift: false,
+            key: "L".into(),
+        },
     };
     cfg.appearance = Appearance {
         font_family: "Segoe UI".into(),
         font_size_dip: 16,
         margin_px: 8,
+        hide_on_fullscreen: false,
     };
 
     let td = tempfile::tempdir().expect("tmpdir");

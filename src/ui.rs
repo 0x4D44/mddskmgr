@@ -37,7 +37,7 @@ unsafe fn set_ctrl_font(hwnd: HWND) {
 
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn layout_dialog(hwnd: HWND) {
-    let dpi = GetDpiForWindow(hwnd) as u32;
+    let dpi = GetDpiForWindow(hwnd);
     let margin = scale(dpi, 12);
     let gap = scale(dpi, 8);
     let label_h = scale(dpi, 20);
@@ -47,10 +47,18 @@ unsafe fn layout_dialog(hwnd: HWND) {
     let client_w = scale(dpi, 460);
 
     // Controls
-    let hlabel = GetDlgItem(hwnd, 1000).ok().unwrap_or(HWND(std::ptr::null_mut()));
-    let hedit = GetDlgItem(hwnd, 1001).ok().unwrap_or(HWND(std::ptr::null_mut()));
-    let hok = GetDlgItem(hwnd, 1).ok().unwrap_or(HWND(std::ptr::null_mut()));
-    let hcancel = GetDlgItem(hwnd, 2).ok().unwrap_or(HWND(std::ptr::null_mut()));
+    let hlabel = GetDlgItem(hwnd, 1000)
+        .ok()
+        .unwrap_or(HWND(std::ptr::null_mut()));
+    let hedit = GetDlgItem(hwnd, 1001)
+        .ok()
+        .unwrap_or(HWND(std::ptr::null_mut()));
+    let hok = GetDlgItem(hwnd, 1)
+        .ok()
+        .unwrap_or(HWND(std::ptr::null_mut()));
+    let hcancel = GetDlgItem(hwnd, 2)
+        .ok()
+        .unwrap_or(HWND(std::ptr::null_mut()));
 
     let y_label = margin;
     let y_edit = y_label + label_h + gap;
@@ -69,9 +77,9 @@ unsafe fn layout_dialog(hwnd: HWND) {
             true,
         );
     }
-        if !hedit.0.is_null() {
-            let _ = MoveWindow(hedit, margin, y_edit, client_w - margin * 2, edit_h, true);
-        }
+    if !hedit.0.is_null() {
+        let _ = MoveWindow(hedit, margin, y_edit, client_w - margin * 2, edit_h, true);
+    }
     if !hok.0.is_null() {
         let _ = MoveWindow(hok, ok_x, y_btn, btn_w, btn_h, true);
     }
@@ -101,37 +109,35 @@ unsafe fn layout_dialog(hwnd: HWND) {
         right: client_w,
         bottom: client_h,
     };
-        let _ = AdjustWindowRectExForDpi(
-            &mut rc,
-            WS_CAPTION | WS_SYSMENU | WS_POPUPWINDOW,
-            false,
-            WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0 | WS_EX_TOPMOST.0),
-            dpi,
-        );
+    let _ = AdjustWindowRectExForDpi(
+        &mut rc,
+        WS_CAPTION | WS_SYSMENU | WS_POPUPWINDOW,
+        false,
+        WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0 | WS_EX_TOPMOST.0),
+        dpi,
+    );
     let wnd_w = rc.right - rc.left;
     let wnd_h = rc.bottom - rc.top;
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            0,
-            0,
-            wnd_w,
-            wnd_h,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-        );
+    let _ = SetWindowPos(
+        hwnd,
+        None,
+        0,
+        0,
+        wnd_w,
+        wnd_h,
+        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+    );
 }
 
 pub fn prompt_text(parent: HWND, caption: &str, hint: &str, initial: &str) -> Option<String> {
     unsafe {
-        eprintln!(
-            "prompt_text: caption='{}', hint='{}', initial='{}'",
-            caption, hint, initial
-        );
+        tracing::debug!(caption=%caption, hint=%hint, initial=%initial, "prompt_text");
         let class = windows::core::w!("OverlayInputDlg");
         let hinst = GetModuleHandleW(None).unwrap();
         let wc = WNDCLASSW {
             lpfnWndProc: Some(dlg_wndproc),
             hInstance: hinst.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             lpszClassName: class,
             ..Default::default()
         };
@@ -141,6 +147,8 @@ pub fn prompt_text(parent: HWND, caption: &str, hint: &str, initial: &str) -> Op
         // Center 420x140 window near the parent
         let (w, h) = (420, 140);
         let (x, y) = center_on_parent(parent, w, h);
+        // Remember previous foreground to restore later
+        let prev_fg = GetForegroundWindow();
         // Prepare initial state and pass pointer via lpParam so WM_CREATE can use it
         let state = Box::new(DialogState {
             text: initial.to_string(),
@@ -167,13 +175,14 @@ pub fn prompt_text(parent: HWND, caption: &str, hint: &str, initial: &str) -> Op
         .ok()?;
 
         let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
 
         // Modal loop
         let mut msg = MSG::default();
         loop {
             if GetMessageW(&mut msg, HWND(0 as _), 0, 0).into() {
                 // Give dialog manager a chance to process VK_RETURN/VK_ESCAPE, tabbing, etc.
-                if IsDialogMessageW(hwnd, &mut msg).as_bool() {
+                if IsDialogMessageW(hwnd, &msg).as_bool() {
                     // fallthrough to check done
                 } else {
                     let _ = TranslateMessage(&msg);
@@ -190,13 +199,20 @@ pub fn prompt_text(parent: HWND, caption: &str, hint: &str, initial: &str) -> Op
                 } else {
                     Some(boxed.text)
                 };
-                eprintln!("prompt_text: returning {:?}", res.as_deref());
+                tracing::debug!(res=?res.as_deref(), "prompt_text: returning");
+                // Restore previous foreground window if valid
+                if !prev_fg.0.is_null() && prev_fg != hwnd {
+                    let _ = SetForegroundWindow(prev_fg);
+                }
                 return res;
             }
         }
         // If we broke out (rare), clean up and return None
         if !state_ptr.is_null() {
             let _ = Box::from_raw(state_ptr);
+        }
+        if !prev_fg.0.is_null() && prev_fg != hwnd {
+            let _ = SetForegroundWindow(prev_fg);
         }
         None
     }
@@ -211,7 +227,7 @@ extern "system" fn dlg_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                 if !cs.lpCreateParams.is_null() {
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
                 }
-                eprintln!("dlg: WM_CREATE");
+                tracing::debug!("dlg: WM_CREATE");
                 // Create edit and buttons
                 let hinst = GetModuleHandleW(None).unwrap();
                 let style = WINDOW_STYLE(
@@ -290,7 +306,7 @@ extern "system" fn dlg_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                 LRESULT(0)
             }
             0x02E0 /* WM_DPICHANGED */ => {
-                let _ = layout_dialog(hwnd);
+                layout_dialog(hwnd);
                 LRESULT(0)
             }
             WM_SETFOCUS => {
@@ -315,7 +331,7 @@ extern "system" fn dlg_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                         let s = String::from_utf16_lossy(
                             &buf[..buf.iter().position(|&c| c == 0).unwrap_or(buf.len())],
                         );
-                        eprintln!("dlg: OK pressed, text='{}'", s);
+                        tracing::debug!(text=%s, "dlg: OK pressed");
                         let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DialogState;
                         if !p.is_null() {
                             (*p).text = s;
@@ -325,7 +341,7 @@ extern "system" fn dlg_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                         LRESULT(0)
                     }
                     2 => {
-                        eprintln!("dlg: Cancel pressed");
+                        tracing::debug!("dlg: Cancel pressed");
                         let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DialogState;
                         if !p.is_null() {
                             (*p).text.clear();

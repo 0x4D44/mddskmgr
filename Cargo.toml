@@ -1,7 +1,11 @@
-[package]
+﻿[package]
 name = "mddskmgr"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+
+[[bin]]
+name = "mddsklbl"
+path = "src/main.rs"
 
 [dependencies]
 windows = { version = "0.58", features = [
@@ -9,6 +13,7 @@ windows = { version = "0.58", features = [
   "Win32_System_Com",
   "Win32_System_Diagnostics_Debug",
   "Win32_System_LibraryLoader",
+  "Win32_System_Registry",
   "Win32_Security",
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Shell",
@@ -42,7 +47,11 @@ winvd = "0.0.48"
 
 [build-dependencies]
 embed-manifest = "1"
+winres = "0.1"
+ico = "0.3"
+image = { version = "0.24", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 tempfile = "3"
 pretty_assertions = "1"
+

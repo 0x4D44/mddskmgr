@@ -8,6 +8,9 @@ fn has_duplicates(hk: &Hotkeys) -> bool {
     dup(&hk.edit_title, &hk.edit_description)
         || dup(&hk.edit_title, &hk.toggle_overlay)
         || dup(&hk.edit_description, &hk.toggle_overlay)
+        || dup(&hk.edit_title, &hk.snap_position)
+        || dup(&hk.edit_description, &hk.snap_position)
+        || dup(&hk.toggle_overlay, &hk.snap_position)
 }
 
 #[test]
@@ -30,6 +33,12 @@ fn detects_duplicate_hotkeys() {
             alt: true,
             shift: false,
             key: "O".into(),
+        },
+        snap_position: KeyChord {
+            ctrl: true,
+            alt: true,
+            shift: false,
+            key: "S".into(),
         },
     };
     assert!(!has_duplicates(&hk));

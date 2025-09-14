@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Build Installer
+        run: |
+          $iscc = "C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe"
+          & $iscc installers\\DesktopLabeler.iss
+
+      - name: Locate installer
+        id: locate
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem installers -Filter "DesktopLabeler-*-Setup.exe" | Select-Object -First 1
+          if (-not $file) { throw 'Installer not found' }
+          echo "path=$($file.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DesktopNameManager-setup
+          path: ${{ steps.locate.outputs.path }}
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.locate.outputs.path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

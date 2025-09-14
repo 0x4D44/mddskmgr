@@ -1,8 +1,11 @@
-#![cfg(windows)]
+// Windows-only module compiled via cfg in the binary's main.rs
 
 use anyhow::Result;
 use std::cell::RefCell;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::RemoteDesktop::{
@@ -10,9 +13,11 @@ use windows::Win32::System::RemoteDesktop::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use mddskmgr::autorun;
 use mddskmgr::config::{self, Config, Paths};
 use mddskmgr::hotkeys::{self, HK_EDIT_DESC, HK_EDIT_TITLE, HK_TOGGLE};
 use mddskmgr::overlay::Overlay;
+use mddskmgr::tray;
 use mddskmgr::tray::{
     CMD_EDIT_DESC, CMD_EDIT_TITLE, CMD_EXIT, CMD_OPEN_CONFIG, CMD_TOGGLE, TRAY_MSG, Tray,
 };
@@ -42,31 +47,41 @@ struct AppState {
     vd_thread: Option<winvd::DesktopEventThread>,
     hide_for_accessibility: bool,
     hide_for_fullscreen: bool,
+    anchor_index: u8, // 0=1/4,1=1/2,2=3/4
 }
 
-fn update_overlay_text(app: &mut AppState) {
-    let label = app
-        .cfg
-        .desktops
-        .get(&app.current_guid)
-        .cloned()
-        .unwrap_or_default();
+fn compute_line(cfg: &Config, guid: &str) -> (String, i32) {
+    let label = cfg.desktops.get(guid).cloned().unwrap_or_default();
     let title = if label.title.trim().is_empty() {
         "Desktop".to_string()
     } else {
         label.title
     };
     let desc = label.description;
-    let line = format!("{}:{}", title, desc);
-    let hints = "(Ctrl+Alt+T, Ctrl+Alt+D)";
-    let margin = app.cfg.appearance.margin_px;
-    eprintln!(
-        "update_overlay_text: guid={}, title='{}', desc='{}' -> line='{}'",
-        app.current_guid, title, desc, line
-    );
-    let _ = app
-        .overlay
-        .draw_line_top_center_with_hints(&line, hints, margin);
+    let line = format!("{} : {}", title, desc);
+    (line, cfg.appearance.margin_px)
+}
+
+fn anchor_ratio_from_index(idx: u8) -> f32 {
+    match idx % 3 {
+        0 => 0.25,
+        1 => 0.5,
+        _ => 0.75,
+    }
+}
+
+fn draw_overlay_line(overlay: &Overlay, cfg: &Config, guid: &str) {
+    let (line, margin) = compute_line(cfg, guid);
+    let hints = "(Ctrl+Alt+T,D,O,L)";
+    tracing::debug!(guid=%guid, line=%line, "update_overlay_text");
+    let ratio = APP.with(|slot| {
+        if let Some(app) = &*slot.borrow() {
+            anchor_ratio_from_index(app.anchor_index)
+        } else {
+            0.5
+        }
+    });
+    let _ = overlay.draw_line_top_anchor_with_hints(&line, hints, margin, ratio);
 }
 
 fn is_high_contrast() -> bool {
@@ -101,19 +116,32 @@ fn is_foreground_fullscreen(app: &AppState) -> bool {
         if GetWindowRect(fg, &mut rc).is_err() {
             return false;
         }
-        // Compare to primary work area
-        let mut work = RECT::default();
-        let _ = SystemParametersInfoW(
-            SPI_GETWORKAREA,
-            0,
-            Some(&mut work as *mut _ as *mut _),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        );
-        let tol = 2; // small tolerance in pixels
-        rc.left <= work.left + tol
-            && rc.top <= work.top + tol
-            && rc.right >= work.right - tol
-            && rc.bottom >= work.bottom - tol
+        // Compare to monitor bounds (not work area) to avoid hiding on maximized windows.
+        let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(mon, &mut mi).as_bool() {
+            return false;
+        }
+        let m = mi.rcMonitor;
+        let tol = 2;
+        let covers_monitor = rc.left <= m.left + tol
+            && rc.top <= m.top + tol
+            && rc.right >= m.right - tol
+            && rc.bottom >= m.bottom - tol;
+        if !covers_monitor {
+            return false;
+        }
+        // If it covers the monitor, treat as fullscreen only when there's no caption (likely borderless fullscreen)
+        let style = GetWindowLongPtrW(fg, GWL_STYLE) as u32;
+        let has_caption = (style & WS_CAPTION.0) != 0;
+        let fullscreen = covers_monitor && !has_caption;
+        if fullscreen {
+            tracing::debug!(style=%format!("0x{style:08X}"), "fullscreen detected");
+        }
+        fullscreen
     }
 }
 
@@ -134,12 +162,12 @@ fn refresh_visibility_now() {
     if let Some((hwnd, should_show)) = args {
         APP.with(|slot| {
             if let Some(app) = &*slot.borrow() {
-                eprintln!(
-                    "refresh_visibility_now: visible={}, hc_hide={}, fs_hide={} => {}",
-                    app.visible,
-                    app.hide_for_accessibility,
-                    app.hide_for_fullscreen,
-                    if should_show { "SHOW" } else { "HIDE" }
+                tracing::debug!(
+                    visible=%app.visible,
+                    hc_hide=%app.hide_for_accessibility,
+                    fs_hide=%app.hide_for_fullscreen,
+                    state=%(if should_show { "SHOW" } else { "HIDE" }),
+                    "refresh_visibility_now"
                 );
             }
         });
@@ -192,13 +220,10 @@ fn quick_edit(edit_title: bool) {
     });
 
     if let Some((hwnd, key, caption, hint, initial)) = snapshot {
-        eprintln!(
-            "quick_edit: '{}' for guid={}, initial='{}'",
-            caption, key, initial
-        );
+        tracing::debug!(caption=%caption, guid=%key, initial=%initial, "quick_edit start");
         if let Some(newtext) = ui::prompt_text(hwnd, &caption, &hint, &initial) {
-            eprintln!("quick_edit: new text='{}'", newtext);
-            let mut updated = false;
+            tracing::debug!(text=%newtext, "quick_edit: new text");
+            let mut snap: Option<(Overlay, Config, String)> = None;
             APP.with(|slot| {
                 if let Some(app) = &mut *slot.borrow_mut() {
                     let entry = app.cfg.desktops.entry(key).or_default();
@@ -208,12 +233,16 @@ fn quick_edit(edit_title: bool) {
                         entry.description = newtext;
                     }
                     let _ = mddskmgr::config::save_atomic(&app.cfg, &app.cfg_paths);
-                    eprintln!("quick_edit: saved config -> {:?}", app.cfg_paths.cfg_file);
-                    update_overlay_text(app);
-                    updated = true;
+                    tracing::debug!(?app.cfg_paths.cfg_file, "quick_edit: saved config");
+                    snap = Some((
+                        app.overlay.clone(),
+                        app.cfg.clone(),
+                        app.current_guid.clone(),
+                    ));
                 }
             });
-            if updated {
+            if let Some((ov, cfg_clone, gid)) = snap {
+                draw_overlay_line(&ov, &cfg_clone, &gid);
                 refresh_visibility_now();
             }
         }
@@ -224,10 +253,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
     match msg {
         WM_CREATE => {
             APP.with(|slot| {
-                let (cfg, paths) = config::load_or_default().expect("config load");
+                let (mut cfg, paths) = config::load_or_default().expect("config load");
+                if cfg.hotkeys.snap_position.key.eq_ignore_ascii_case("S") {
+                    cfg.hotkeys.snap_position.key = "L".into();
+                    let _ = config::save_atomic(&cfg, &paths);
+                }
                 let overlay = Overlay::new(hwnd, &cfg.appearance.font_family, cfg.appearance.font_size_dip).expect("overlay");
                 let taskbar_created_msg = unsafe { RegisterWindowMessageW(PCWSTR(windows::core::w!("TaskbarCreated").as_wide().as_ptr())) };
-                let tray = Tray::new(hwnd, "Desktop Overlay").expect("tray");
+                let tray = Tray::new(hwnd, "Desktop Labeler").expect("tray");
 
                 // Register hotkeys (warn on duplicates)
                 let hk = &cfg.hotkeys;
@@ -238,13 +271,17 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 let _ = hotkeys::register(hwnd, hk.edit_title.ctrl, hk.edit_title.alt, hk.edit_title.shift, &hk.edit_title.key, HK_EDIT_TITLE);
                 let _ = hotkeys::register(hwnd, hk.edit_description.ctrl, hk.edit_description.alt, hk.edit_description.shift, &hk.edit_description.key, HK_EDIT_DESC);
                 let _ = hotkeys::register(hwnd, hk.toggle_overlay.ctrl, hk.toggle_overlay.alt, hk.toggle_overlay.shift, &hk.toggle_overlay.key, HK_TOGGLE);
+                let _ = hotkeys::register(hwnd, hk.snap_position.ctrl, hk.snap_position.alt, hk.snap_position.shift, &hk.snap_position.key, hotkeys::HK_SNAP);
 
                 let current_guid = vd::get_current_desktop_guid();
                 let vd_thread = mddskmgr::vd::start_vd_events(hwnd, WM_VD_SWITCHED);
-                let mut app = AppState { hwnd, cfg, cfg_paths: paths, overlay, current_guid, visible: true, tray, taskbar_created_msg, vd_thread, hide_for_accessibility: false, hide_for_fullscreen: false };
-                update_overlay_text(&mut app);
+                let app = AppState { hwnd, cfg, cfg_paths: paths, overlay, current_guid, visible: true, tray, taskbar_created_msg, vd_thread, hide_for_accessibility: false, hide_for_fullscreen: false, anchor_index: 1 };
+                // Draw initial line before storing
+                let ov = app.overlay.clone();
+                let cfg_clone = app.cfg.clone();
+                let gid = app.current_guid.clone();
                 *slot.borrow_mut() = Some(app);
-
+                draw_overlay_line(&ov, &cfg_clone, &gid);
                 start_runtime_services(hwnd);
             });
             LRESULT(0)
@@ -260,21 +297,35 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             let _ = mddskmgr::tray::Tray::re_add_for(hwnd);
             LRESULT(0)
         }
+        WM_RBUTTONUP | WM_CONTEXTMENU => {
+            let _ = mddskmgr::tray::Tray::show_popup_menu(hwnd);
+            LRESULT(0)
+        }
+        WM_SETCURSOR => {
+            unsafe {
+                let _ = SetCursor(LoadCursorW(None, IDC_ARROW).unwrap_or_default());
+            }
+            LRESULT(1)
+        }
         WM_VD_SWITCHED => {
+            // Update current GUID, then draw outside of the borrow to avoid re-entrancy
+            let mut snapshot: Option<(Overlay, Config, String)> = None;
             APP.with(|slot| {
                 if let Some(app) = &mut *slot.borrow_mut() {
                     let id = vd::get_current_desktop_guid();
                     if id != app.current_guid {
-                        app.current_guid = id;
-                        update_overlay_text(app);
+                        app.current_guid = id.clone();
                     }
+                    snapshot = Some((app.overlay.clone(), app.cfg.clone(), app.current_guid.clone()));
                 }
             });
+            if let Some((ov, cfg_clone, gid)) = snapshot { draw_overlay_line(&ov, &cfg_clone, &gid); }
             LRESULT(0)
         }
         WM_CFG_CHANGED => {
             // Reload config and apply labels/hotkeys; show any balloon outside borrow.
             let mut need_balloon = false;
+            let mut snapshot: Option<(Overlay, Config, String, HWND)> = None;
             APP.with(|slot| {
                 if let Some(app) = &mut *slot.borrow_mut() {
                     if let Ok((new_cfg, _)) = mddskmgr::config::load_or_default() {
@@ -283,36 +334,58 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         mddskmgr::hotkeys::unregister(app.hwnd, HK_EDIT_TITLE);
                         mddskmgr::hotkeys::unregister(app.hwnd, HK_EDIT_DESC);
                         mddskmgr::hotkeys::unregister(app.hwnd, HK_TOGGLE);
+                        mddskmgr::hotkeys::unregister(app.hwnd, hotkeys::HK_SNAP);
                         let hk = &app.cfg.hotkeys;
                         let ok1 = mddskmgr::hotkeys::register(app.hwnd, hk.edit_title.ctrl, hk.edit_title.alt, hk.edit_title.shift, &hk.edit_title.key, HK_EDIT_TITLE).unwrap_or(false);
                         let ok2 = mddskmgr::hotkeys::register(app.hwnd, hk.edit_description.ctrl, hk.edit_description.alt, hk.edit_description.shift, &hk.edit_description.key, HK_EDIT_DESC).unwrap_or(false);
                         let ok3 = mddskmgr::hotkeys::register(app.hwnd, hk.toggle_overlay.ctrl, hk.toggle_overlay.alt, hk.toggle_overlay.shift, &hk.toggle_overlay.key, HK_TOGGLE).unwrap_or(false);
-                        if !(ok1 && ok2 && ok3) { need_balloon = true; }
-                        update_overlay_text(app);
+                        let ok4 = mddskmgr::hotkeys::register(app.hwnd, hk.snap_position.ctrl, hk.snap_position.alt, hk.snap_position.shift, &hk.snap_position.key, hotkeys::HK_SNAP).unwrap_or(false);
+                        if !(ok1 && ok2 && ok3 && ok4) { need_balloon = true; }
+                        snapshot = Some((app.overlay.clone(), app.cfg.clone(), app.current_guid.clone(), app.hwnd));
                     }
                 }
             });
+            if let Some((ov, cfg_clone, gid, _)) = snapshot { draw_overlay_line(&ov, &cfg_clone, &gid); }
             if need_balloon {
                 let _ = mddskmgr::tray::Tray::balloon_for(hwnd, "Hotkeys", "Some hotkeys failed to register. Adjust in labels.json");
             }
             LRESULT(0)
         }
         WM_TIMER => {
-            APP.with(|slot| {
-                if let Some(app) = &mut *slot.borrow_mut() {
-                    if w.0 == 1 { // VD poller
+            if w.0 == 1 { // VD poller
+                let mut snapshot: Option<(Overlay, Config, String)> = None;
+                APP.with(|slot| {
+                    if let Some(app) = &mut *slot.borrow_mut() {
                         let id = vd::get_current_desktop_guid();
                         if id != app.current_guid {
-                            app.current_guid = id;
-                            update_overlay_text(app);
+                            app.current_guid = id.clone();
                         }
-                    } else if w.0 == 2 { // visibility check
-                        let hide = is_foreground_fullscreen(app);
+                        snapshot = Some((app.overlay.clone(), app.cfg.clone(), app.current_guid.clone()));
+                    }
+                });
+                if let Some((ov, cfg_clone, gid)) = snapshot { draw_overlay_line(&ov, &cfg_clone, &gid); }
+            } else if w.0 == 2 {
+                APP.with(|slot| {
+                    if let Some(app) = &mut *slot.borrow_mut() {
+                        let hide = if app.cfg.appearance.hide_on_fullscreen { is_foreground_fullscreen(app) } else { false };
                         app.hide_for_fullscreen = hide;
                     }
-                }
-            });
+                });
+            }
             if w.0 == 2 { refresh_visibility_now(); }
+            if w.0 == 3 {
+                // Keep overlay at the top of TOPMOST band without stealing focus
+                let visible = APP.with(|slot| {
+                    if let Some(app) = &*slot.borrow() {
+                        mddskmgr::core::should_show(
+                            app.visible,
+                            app.hide_for_accessibility,
+                            app.hide_for_fullscreen,
+                        )
+                    } else { false }
+                });
+                if visible { unsafe { let _ = SetWindowPos(hwnd, HWND_TOPMOST, 0,0,0,0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); } }
+            }
             LRESULT(0)
         }
         WM_SETTINGCHANGE => {
@@ -350,6 +423,17 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     });
                     need_refresh = true;
                 }
+                hotkeys::HK_SNAP => {
+                    let mut snap: Option<(Overlay, Config, String, f32)> = None;
+                    APP.with(|slot| {
+                        if let Some(app) = &mut *slot.borrow_mut() {
+                            app.anchor_index = (app.anchor_index + 1) % 3;
+                            let ratio = anchor_ratio_from_index(app.anchor_index);
+                            snap = Some((app.overlay.clone(), app.cfg.clone(), app.current_guid.clone(), ratio));
+                        }
+                    });
+                    if let Some((ov, cfg_clone, gid, _ratio)) = snap { draw_overlay_line(&ov, &cfg_clone, &gid); }
+                }
                 _ => {}
             }
             if need_refresh { refresh_visibility_now(); }
@@ -369,6 +453,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             }
             LRESULT(0)
         }
+        WM_CLOSE => {
+            unsafe { let _ = DestroyWindow(hwnd); }
+            LRESULT(0)
+        }
         WM_COMMAND => {
             let cmd = (w.0 & 0xFFFF) as u16;
             match cmd {
@@ -383,16 +471,33 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 CMD_OPEN_CONFIG => {
                     // Snapshot path then ShellExecute without holding borrow.
                     let path = APP.with(|slot| {
-                        if let Some(app) = &*slot.borrow() {
-                            Some(app.cfg_paths.cfg_file.to_string_lossy().to_string())
-                        } else { None }
+                        slot.borrow()
+                            .as_ref()
+                            .map(|app| app.cfg_paths.cfg_file.to_string_lossy().to_string())
                     });
                     if let Some(path) = path {
                         let wpath: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
                         unsafe { let _ = ShellExecuteW(None, PCWSTR(windows::core::w!("open").as_wide().as_ptr()), PCWSTR(wpath.as_ptr()), None, None, SW_SHOWNORMAL); }
                     }
                 }
-                CMD_EXIT => unsafe { PostQuitMessage(0); },
+                CMD_EXIT => {
+                    // Trigger orderly teardown to avoid hangs: destroy window -> WM_DESTROY posts quit.
+                    unsafe { let _ = DestroyWindow(hwnd); }
+                },
+                tray::CMD_RUN_AT_STARTUP => {
+                    let cur = autorun::get_run_at_login();
+                    let _ = autorun::set_run_at_login(!cur);
+                }
+                tray::CMD_ABOUT => {
+                    unsafe {
+                        let _ = MessageBoxW(
+                            hwnd,
+                            PCWSTR(windows::core::w!("Desktop Labeler\r\n\r\nShows a per-desktop title overlay on the primary monitor.\r\n\r\nHotkeys:\r\n  Ctrl+Alt+T  Edit Title\r\n  Ctrl+Alt+D  Edit Description\r\n  Ctrl+Alt+O  Toggle Overlay\r\n  Ctrl+Alt+L  Snap Position").as_wide().as_ptr()),
+                            PCWSTR(windows::core::w!("About Desktop Labeler").as_wide().as_ptr()),
+                            MB_OK | MB_ICONINFORMATION,
+                        );
+                    }
+                }
                 _ => {}
             }
             LRESULT(0)
@@ -400,9 +505,20 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
         WM_DESTROY => {
             APP.with(|slot| {
                 if let Some(app) = &mut *slot.borrow_mut() {
+                    // Stop timers to avoid re-entrancy during teardown
+                    unsafe {
+                        let _ = KillTimer(hwnd, 1);
+                        let _ = KillTimer(hwnd, 2);
+                        let _ = KillTimer(hwnd, 3);
+                    }
                     mddskmgr::hotkeys::unregister(app.hwnd, HK_EDIT_TITLE);
                     mddskmgr::hotkeys::unregister(app.hwnd, HK_EDIT_DESC);
                     mddskmgr::hotkeys::unregister(app.hwnd, HK_TOGGLE);
+                    mddskmgr::hotkeys::unregister(app.hwnd, hotkeys::HK_SNAP);
+                    // Remove tray icon to prevent ghost icons after exit
+                    app.tray.remove_icon();
+                    // Drop virtual desktop event thread if present
+                    app.vd_thread = None;
                 }
             });
             unsafe { let _ = WTSUnRegisterSessionNotification(hwnd); }
@@ -436,6 +552,10 @@ fn start_runtime_services(hwnd: HWND) {
                 }
                 unsafe {
                     SetTimer(hwnd, 2, 1000, None);
+                }
+                // Periodic topmost reassertion
+                unsafe {
+                    SetTimer(hwnd, 3, 1200, None);
                 }
                 unsafe {
                     let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
@@ -480,25 +600,10 @@ fn start_runtime_services(hwnd: HWND) {
 }
 
 pub fn main() -> Result<()> {
-    // File logging (daily) + env filter
-    let (cfg_paths_log, _): (String, ()) = {
-        let p = mddskmgr::config::project_paths().ok();
-        if let Some(paths) = p {
-            (paths.log_dir.to_string_lossy().to_string(), ())
-        } else {
-            (".".to_string(), ())
-        }
-    };
-    std::fs::create_dir_all(&cfg_paths_log).ok();
-    let file_appender = tracing_appender::rolling::daily(&cfg_paths_log, "overlay.log");
-    let (nb, _guard) = tracing_appender::non_blocking(file_appender);
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(nb)
-        .init();
+    // Logging is initialized by src/main.rs; nothing to do here.
 
     if !single_instance_guard() {
-        println!("Another instance is already running. Exiting.");
+        tracing::warn!("Another instance is already running. Exiting.");
         return Ok(());
     }
 
@@ -510,13 +615,16 @@ pub fn main() -> Result<()> {
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: hinst.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             lpszClassName: class_name,
             ..Default::default()
         };
         RegisterClassW(&wc);
 
         let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE((WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE).0),
+            WINDOW_EX_STYLE(
+                (WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE).0,
+            ),
             class_name,
             windows::core::w!(""),
             WS_POPUP,
@@ -529,9 +637,9 @@ pub fn main() -> Result<()> {
             hinst,
             None,
         )?;
-        // Pin overlay window across desktops when supported
-        let _ = winvd::pin_window(hwnd);
+        // Show first, then pin across desktops to avoid early 'WindowNotFound' logs in some shells
         let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = winvd::pin_window(hwnd);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0).into() {
@@ -574,6 +682,7 @@ mod tests {
                 vd_thread: None,
                 hide_for_accessibility: false,
                 hide_for_fullscreen: false,
+                anchor_index: 1,
             };
             *slot.borrow_mut() = Some(app);
         });
@@ -619,6 +728,7 @@ mod tests {
                             vd_thread: None,
                             hide_for_accessibility: false,
                             hide_for_fullscreen: false,
+                            anchor_index: 1,
                         };
                         *slot.borrow_mut() = Some(app);
                     });
@@ -641,6 +751,7 @@ mod tests {
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(test_wndproc),
                 hInstance: hinst.into(),
+                hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
                 lpszClassName: class_name,
                 ..Default::default()
             };

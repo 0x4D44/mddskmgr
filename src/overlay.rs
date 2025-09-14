@@ -8,13 +8,16 @@ use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE};
+use windows::Win32::UI::WindowsAndMessaging::{
+    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW, ULW_ALPHA,
     UpdateLayeredWindow,
 };
 use windows::core::{Interface, PCWSTR};
 
+#[derive(Clone)]
 pub struct Overlay {
     hwnd: HWND,
     font_family: String,
@@ -41,10 +44,7 @@ impl Overlay {
         hints: &str,
         margin_px: i32,
     ) -> Result<()> {
-        eprintln!(
-            "overlay: draw_line_top_center text='{}' hints='{}'",
-            text, hints
-        );
+        tracing::debug!(text=%text, hints=%hints, "overlay: draw_line_top_center");
         let (w, h) = self.measure_text_with_hints(text, hints)?;
         let w_pad = w + margin_px * 2;
         let h_pad = h + margin_px * 2;
@@ -65,11 +65,49 @@ impl Overlay {
 
         let res = self.render_and_update(text, hints, x, y, w_pad, h_pad, margin_px);
         if let Err(e) = &res {
-            eprintln!("overlay: render_and_update error: {e:?}");
+            tracing::warn!(error=?e, "overlay: render_and_update error");
         }
         res
     }
 
+    pub fn draw_line_top_anchor_with_hints(
+        &self,
+        text: &str,
+        hints: &str,
+        margin_px: i32,
+        anchor_ratio: f32,
+    ) -> Result<()> {
+        let (w, h) = self.measure_text_with_hints(text, hints)?;
+        let w_pad = w + margin_px * 2;
+        let h_pad = h + margin_px * 2;
+        // Work area
+        let mut work: RECT = RECT::default();
+        unsafe {
+            let _ = SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some(&mut work as *mut _ as *mut c_void),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            );
+        };
+        let work_w = work.right - work.left;
+        let anchor_x = work.left as f32 + (work_w as f32 * anchor_ratio);
+        let mut x = anchor_x.round() as i32 - w_pad / 2;
+        if x < work.left {
+            x = work.left;
+        }
+        if x + w_pad > work.right {
+            x = work.right - w_pad;
+        }
+        let y = work.top + margin_px;
+        let res = self.render_and_update(text, hints, x, y, w_pad, h_pad, margin_px);
+        if let Err(e) = &res {
+            tracing::warn!(error=?e, "overlay: render_and_update error");
+        }
+        res
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn render_and_update(
         &self,
         text: &str,
@@ -159,7 +197,7 @@ impl Overlay {
             }
 
             // Apply a rounded window region to clip hit-testing and visuals
-            let radius = (self.font_px as i32 / 2).clamp(6, 20);
+            let radius = (self.font_px / 2).clamp(6, 20);
             let hrgn = CreateRoundRectRgn(0, 0, width, height, radius * 2, radius * 2);
             let _ = SetWindowRgn(self.hwnd, hrgn, true);
 
@@ -190,11 +228,19 @@ impl Overlay {
                 ULW_ALPHA,
             );
             if let Err(e) = &ulw_res {
-                eprintln!("overlay: UpdateLayeredWindow failed: {e:?}");
+                tracing::warn!(error=?e, "overlay: UpdateLayeredWindow failed");
             }
 
             // Reassert topmost after painting without activating
-            let _ = SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            let _ = SetWindowPos(
+                self.hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
 
             // Cleanup
             SelectObject(mem_dc, old);
@@ -219,7 +265,7 @@ impl Overlay {
                 PCWSTR(windows::core::w!("en-US").as_wide().as_ptr()),
             )?;
             let combined = if hints.is_empty() {
-                format!("{}", text)
+                text.to_string()
             } else {
                 format!("{} {}", text, hints)
             };
@@ -289,6 +335,7 @@ fn get_d2d_factory() -> Result<&'static ID2D1Factory> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_d2d_with_hints(
     hdc: HDC,
     width: i32,
@@ -340,7 +387,12 @@ fn render_d2d_with_hints(
             None,
         )?;
         let rounded = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F { left: 0.0, top: 0.0, right: width as f32, bottom: height as f32 },
+            rect: D2D_RECT_F {
+                left: 0.0,
+                top: 0.0,
+                right: width as f32,
+                bottom: height as f32,
+            },
             radiusX: (font_px as f32 * 0.5).clamp(6.0, 20.0),
             radiusY: (font_px as f32 * 0.5).clamp(6.0, 20.0),
         };
@@ -357,7 +409,7 @@ fn render_d2d_with_hints(
             PCWSTR(windows::core::w!("en-US").as_wide().as_ptr()),
         )?;
         let combined = if hints.is_empty() {
-            format!("{}", text)
+            text.to_string()
         } else {
             format!("{} {}", text, hints)
         };

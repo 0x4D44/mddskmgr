@@ -1,6 +1,8 @@
 use anyhow::{Result, anyhow};
 use std::mem::size_of;
 use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Shell::ExtractIconW;
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
     Shell_NotifyIconW,
@@ -16,12 +18,35 @@ pub const CMD_EDIT_DESC: u16 = 1002;
 pub const CMD_TOGGLE: u16 = 1003;
 pub const CMD_OPEN_CONFIG: u16 = 1004;
 pub const CMD_EXIT: u16 = 1005;
+pub const CMD_ABOUT: u16 = 1006;
+pub const CMD_RUN_AT_STARTUP: u16 = 1007;
 
 pub struct Tray {
     pub nid: NOTIFYICONDATAW,
 }
 
 impl Tray {
+    fn load_app_icon() -> HICON {
+        unsafe {
+            let hinst = GetModuleHandleW(None).unwrap_or_default();
+            // Try extracting the primary icon from our executable
+            if let Ok(exe) = std::env::current_exe() {
+                let wpath: Vec<u16> = exe
+                    .display()
+                    .to_string()
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let icon = ExtractIconW(hinst, PCWSTR(wpath.as_ptr()), 0);
+                if !icon.0.is_null() && icon.0 as usize > 1 {
+                    return icon;
+                }
+            }
+            // Fallback to stock app icon
+            LoadIconW(None, IDI_APPLICATION).unwrap_or_default()
+        }
+    }
+
     pub fn new(hwnd: HWND, tip: &str) -> Result<Self> {
         unsafe {
             let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
@@ -30,8 +55,8 @@ impl Tray {
             nid.uID = TRAY_UID;
             nid.uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON;
             nid.uCallbackMessage = TRAY_MSG;
-            // Load a stock application icon
-            nid.hIcon = LoadIconW(None, IDI_APPLICATION)?;
+            // Load our embedded app icon; fallback to stock if needed
+            nid.hIcon = Self::load_app_icon();
             // Set tooltip
             let mut wtip: Vec<u16> = tip.encode_utf16().collect();
             wtip.push(0);
@@ -65,6 +90,7 @@ impl Tray {
             self.nid.szInfoTitle[..lt].copy_from_slice(&wtitle[..lt]);
             let li = wtext.len().min(self.nid.szInfo.len());
             self.nid.szInfo[..li].copy_from_slice(&wtext[..li]);
+            self.nid.hIcon = Self::load_app_icon();
             let _ = Shell_NotifyIconW(NIM_MODIFY, &self.nid);
         }
     }
@@ -97,6 +123,26 @@ impl Tray {
                 CMD_OPEN_CONFIG as usize,
                 PCWSTR(windows::core::w!("Open Config").as_wide().as_ptr()),
             )?;
+            AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null())?;
+            AppendMenuW(
+                hmenu,
+                MF_STRING,
+                CMD_RUN_AT_STARTUP as usize,
+                PCWSTR(windows::core::w!("Run at startup").as_wide().as_ptr()),
+            )?;
+            // Reflect current autorun state
+            let enabled = crate::autorun::get_run_at_login();
+            let _ = CheckMenuItem(
+                hmenu,
+                CMD_RUN_AT_STARTUP as u32,
+                (MF_BYCOMMAND | if enabled { MF_CHECKED } else { MF_UNCHECKED }).0,
+            );
+            AppendMenuW(
+                hmenu,
+                MF_STRING,
+                CMD_ABOUT as usize,
+                PCWSTR(windows::core::w!("About...").as_wide().as_ptr()),
+            )?;
             AppendMenuW(
                 hmenu,
                 MF_STRING,
@@ -127,19 +173,20 @@ impl Tray {
             nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
             nid.hWnd = hwnd;
             nid.uID = TRAY_UID;
-            nid.uFlags = NIF_INFO;
+            nid.uFlags = NIF_INFO | NIF_ICON;
             let wtitle: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
             let wtext: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
             let lt = wtitle.len().min(nid.szInfoTitle.len());
             nid.szInfoTitle[..lt].copy_from_slice(&wtitle[..lt]);
             let li = wtext.len().min(nid.szInfo.len());
             nid.szInfo[..li].copy_from_slice(&wtext[..li]);
+            nid.hIcon = Self::load_app_icon();
             if !Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool() {
                 // In case the icon is missing (e.g., Explorer restart), re-add then modify.
                 nid.uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON | NIF_INFO;
                 nid.uCallbackMessage = TRAY_MSG;
-                nid.hIcon = LoadIconW(None, IDI_APPLICATION)?;
-                let tip = "Desktop Overlay";
+                nid.hIcon = Self::load_app_icon();
+                let tip = "Desktop Labeler";
                 let wtip: Vec<u16> = tip.encode_utf16().chain(std::iter::once(0)).collect();
                 let lt2 = wtip.len().min(nid.szTip.len());
                 nid.szTip[..lt2].copy_from_slice(&wtip[..lt2]);
@@ -157,8 +204,8 @@ impl Tray {
             nid.uID = TRAY_UID;
             nid.uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON;
             nid.uCallbackMessage = TRAY_MSG;
-            nid.hIcon = LoadIconW(None, IDI_APPLICATION)?;
-            let tip = "Desktop Overlay";
+            nid.hIcon = Self::load_app_icon();
+            let tip = "Desktop Labeler";
             let wtip: Vec<u16> = tip.encode_utf16().chain(std::iter::once(0)).collect();
             let lt = wtip.len().min(nid.szTip.len());
             nid.szTip[..lt].copy_from_slice(&wtip[..lt]);
