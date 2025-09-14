@@ -24,12 +24,23 @@ jobs:
         run: cargo build --release
 
       - name: Install Inno Setup
-        run: choco install innosetup -y
+        run: choco install innosetup -y --no-progress
+
+      - name: Locate Inno Setup
+        id: inno
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Path
+          if (-not $iscc) {
+            $candidate = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+            if (Test-Path $candidate) { $iscc = $candidate }
+          }
+          if (-not $iscc) { throw 'ISCC.exe not found after installation' }
+          "iscc=$iscc" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Build Installer
         run: |
-          $iscc = "C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe"
-          & $iscc installers\\DesktopLabeler.iss
+          & "${{ steps.inno.outputs.iscc }}" installers\DesktopLabeler.iss
 
       - name: Locate installer
         id: locate
