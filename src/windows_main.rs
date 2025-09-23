@@ -327,22 +327,24 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             let mut need_balloon = false;
             let mut snapshot: Option<(Overlay, Config, String, HWND)> = None;
             APP.with(|slot| {
-                if let Some(app) = &mut *slot.borrow_mut() {
-                    if let Ok((new_cfg, _)) = mddskmgr::config::load_or_default() {
-                        app.cfg = new_cfg;
-                        // Re-register hotkeys
-                        mddskmgr::hotkeys::unregister(app.hwnd, HK_EDIT_TITLE);
-                        mddskmgr::hotkeys::unregister(app.hwnd, HK_EDIT_DESC);
-                        mddskmgr::hotkeys::unregister(app.hwnd, HK_TOGGLE);
-                        mddskmgr::hotkeys::unregister(app.hwnd, hotkeys::HK_SNAP);
-                        let hk = &app.cfg.hotkeys;
-                        let ok1 = mddskmgr::hotkeys::register(app.hwnd, hk.edit_title.ctrl, hk.edit_title.alt, hk.edit_title.shift, &hk.edit_title.key, HK_EDIT_TITLE).unwrap_or(false);
-                        let ok2 = mddskmgr::hotkeys::register(app.hwnd, hk.edit_description.ctrl, hk.edit_description.alt, hk.edit_description.shift, &hk.edit_description.key, HK_EDIT_DESC).unwrap_or(false);
-                        let ok3 = mddskmgr::hotkeys::register(app.hwnd, hk.toggle_overlay.ctrl, hk.toggle_overlay.alt, hk.toggle_overlay.shift, &hk.toggle_overlay.key, HK_TOGGLE).unwrap_or(false);
-                        let ok4 = mddskmgr::hotkeys::register(app.hwnd, hk.snap_position.ctrl, hk.snap_position.alt, hk.snap_position.shift, &hk.snap_position.key, hotkeys::HK_SNAP).unwrap_or(false);
-                        if !(ok1 && ok2 && ok3 && ok4) { need_balloon = true; }
-                        snapshot = Some((app.overlay.clone(), app.cfg.clone(), app.current_guid.clone(), app.hwnd));
-                    }
+                let mut borrow = slot.borrow_mut();
+                if let (Some(app), Ok((new_cfg, _))) = (
+                    &mut *borrow,
+                    mddskmgr::config::load_or_default(),
+                ) {
+                    app.cfg = new_cfg;
+                    // Re-register hotkeys
+                    mddskmgr::hotkeys::unregister(app.hwnd, HK_EDIT_TITLE);
+                    mddskmgr::hotkeys::unregister(app.hwnd, HK_EDIT_DESC);
+                    mddskmgr::hotkeys::unregister(app.hwnd, HK_TOGGLE);
+                    mddskmgr::hotkeys::unregister(app.hwnd, hotkeys::HK_SNAP);
+                    let hk = &app.cfg.hotkeys;
+                    let ok1 = mddskmgr::hotkeys::register(app.hwnd, hk.edit_title.ctrl, hk.edit_title.alt, hk.edit_title.shift, &hk.edit_title.key, HK_EDIT_TITLE).unwrap_or(false);
+                    let ok2 = mddskmgr::hotkeys::register(app.hwnd, hk.edit_description.ctrl, hk.edit_description.alt, hk.edit_description.shift, &hk.edit_description.key, HK_EDIT_DESC).unwrap_or(false);
+                    let ok3 = mddskmgr::hotkeys::register(app.hwnd, hk.toggle_overlay.ctrl, hk.toggle_overlay.alt, hk.toggle_overlay.shift, &hk.toggle_overlay.key, HK_TOGGLE).unwrap_or(false);
+                    let ok4 = mddskmgr::hotkeys::register(app.hwnd, hk.snap_position.ctrl, hk.snap_position.alt, hk.snap_position.shift, &hk.snap_position.key, hotkeys::HK_SNAP).unwrap_or(false);
+                    if !(ok1 && ok2 && ok3 && ok4) { need_balloon = true; }
+                    snapshot = Some((app.overlay.clone(), app.cfg.clone(), app.current_guid.clone(), app.hwnd));
                 }
             });
             if let Some((ov, cfg_clone, gid, _)) = snapshot { draw_overlay_line(&ov, &cfg_clone, &gid); }
