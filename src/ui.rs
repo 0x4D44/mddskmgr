@@ -29,6 +29,12 @@ fn scale(dpi: u32, v: i32) -> i32 {
     ((v as i64 * dpi as i64 + 48) / 96) as i32
 }
 
+#[allow(unknown_lints)]
+#[allow(clippy::manual_dangling_ptr)]
+fn menu_id(id: usize) -> HMENU {
+    HMENU(id as *mut c_void)
+}
+
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn set_ctrl_font(hwnd: HWND) {
     let hobj = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
@@ -246,7 +252,7 @@ extern "system" fn dlg_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                     WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | SS_LEFT),
                     0,0,0,0,
                     hwnd,
-                    HMENU(1000usize as *mut c_void),
+                    menu_id(1000),
                     hinst,
                     None,
                 );
@@ -257,7 +263,7 @@ extern "system" fn dlg_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                     style,
                     0,0,0,0,
                     hwnd,
-                    HMENU(1001usize as *mut c_void),
+                    menu_id(1001),
                     hinst,
                     None,
                 )
@@ -271,7 +277,7 @@ extern "system" fn dlg_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                     WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | (BS_PUSHBUTTON as u32)),
                     0,0,0,0,
                     hwnd,
-                    HMENU(1usize as *mut c_void),
+                    menu_id(1),
                     hinst,
                     None,
                 )
@@ -283,7 +289,7 @@ extern "system" fn dlg_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
                     WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0),
                     0,0,0,0,
                     hwnd,
-                    HMENU(2usize as *mut c_void),
+                    menu_id(2),
                     hinst,
                     None,
                 )
