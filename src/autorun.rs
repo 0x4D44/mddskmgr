@@ -1,10 +1,7 @@
 #[cfg(windows)]
-use windows::Win32::System::Registry::*;
-
+use crate::utils::to_utf16;
 #[cfg(windows)]
-fn to_utf16(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
+use windows::Win32::System::Registry::*;
 
 #[cfg(windows)]
 fn run_key() -> anyhow::Result<HKEY> {
@@ -113,6 +110,8 @@ unsafe fn ensure_startup_marker(
     if data.is_empty() {
         data.resize(8, 0);
     }
+    // Windows StartupApproved format: byte 0 = 0x02 (enabled) or 0x03 (disabled)
+    // See: https://docs.microsoft.com/en-us/windows/win32/taskschd/task-scheduler-start-page
     data[0] = if enabled { 0x02 } else { 0x03 };
     let status = unsafe { RegSetValueExW(hkey, value, 0, REG_BINARY, Some(&data)) };
     if status.is_err() {

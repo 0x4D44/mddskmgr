@@ -8,6 +8,8 @@ pub struct Config {
     pub desktops: HashMap<String, DesktopLabel>,
     pub hotkeys: Hotkeys,
     pub appearance: Appearance,
+    #[serde(default)]
+    pub version: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -85,6 +87,7 @@ impl Default for Config {
                 margin_px: 8,
                 hide_on_fullscreen: false,
             },
+            version: None,
         }
     }
 }
@@ -113,19 +116,39 @@ pub fn project_paths() -> Result<Paths> {
 
 pub fn load_or_default() -> Result<(Config, Paths)> {
     let paths = project_paths()?;
-    fs::create_dir_all(&paths.cfg_dir).ok();
-    fs::create_dir_all(&paths.log_dir).ok();
-    let cfg = match fs::read_to_string(&paths.cfg_file) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+    if let Err(e) = fs::create_dir_all(&paths.cfg_dir) {
+        tracing::warn!("Failed to create config directory: {}", e);
+    }
+    if let Err(e) = fs::create_dir_all(&paths.log_dir) {
+        tracing::warn!("Failed to create log directory: {}", e);
+    }
+    let mut cfg = match fs::read_to_string(&paths.cfg_file) {
+        Ok(s) => match serde_json::from_str(&s) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!("Failed to parse config JSON: {}, using defaults", e);
+                Config::default()
+            }
+        },
         Err(_) => {
             // Migrate from old app name if present
             if let Some(old_dirs) = ProjectDirs::from("com", "Acme", "DesktopOverlay") {
                 let old_file = old_dirs.config_dir().join("labels.json");
                 if let Ok(s) = fs::read_to_string(&old_file) {
-                    let parsed: Config = serde_json::from_str(&s).unwrap_or_default();
-                    // Save to new location
-                    let _ = save_atomic(&parsed, &paths);
-                    parsed
+                    match serde_json::from_str(&s) {
+                        Ok(parsed) => {
+                            // Save to new location
+                            let _ = save_atomic(&parsed, &paths);
+                            parsed
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to parse migration config JSON: {}, using defaults",
+                                e
+                            );
+                            Config::default()
+                        }
+                    }
                 } else {
                     Config::default()
                 }
@@ -134,6 +157,16 @@ pub fn load_or_default() -> Result<(Config, Paths)> {
             }
         }
     };
+
+    // Migration: Change snap_position hotkey from "S" to "L" for version 0 or None
+    if cfg.version.is_none() || cfg.version == Some(0) {
+        if cfg.hotkeys.snap_position.key.eq_ignore_ascii_case("S") {
+            cfg.hotkeys.snap_position.key = "L".into();
+        }
+        cfg.version = Some(1);
+        let _ = save_atomic(&cfg, &paths);
+    }
+
     Ok((cfg, paths))
 }
 

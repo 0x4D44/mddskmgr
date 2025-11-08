@@ -1,3 +1,4 @@
+use crate::utils::to_utf16;
 use anyhow::{Result, anyhow};
 use std::mem::size_of;
 use windows::Win32::Foundation::{HWND, POINT};
@@ -31,12 +32,7 @@ impl Tray {
             let hinst = GetModuleHandleW(None).unwrap_or_default();
             // Try extracting the primary icon from our executable
             if let Ok(exe) = std::env::current_exe() {
-                let wpath: Vec<u16> = exe
-                    .display()
-                    .to_string()
-                    .encode_utf16()
-                    .chain(std::iter::once(0))
-                    .collect();
+                let wpath = to_utf16(&exe.display().to_string());
                 let icon = ExtractIconW(hinst, PCWSTR(wpath.as_ptr()), 0);
                 if !icon.0.is_null() && icon.0 as usize > 1 {
                     return icon;
@@ -49,6 +45,8 @@ impl Tray {
 
     pub fn new(hwnd: HWND, tip: &str) -> Result<Self> {
         unsafe {
+            // SAFETY: NOTIFYICONDATAW is a C struct from the Windows API that can be safely zero-initialized.
+            // All fields are explicitly set below, and Windows API documentation specifies this initialization pattern.
             let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
             nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
             nid.hWnd = hwnd;
@@ -58,8 +56,7 @@ impl Tray {
             // Load our embedded app icon; fallback to stock if needed
             nid.hIcon = Self::load_app_icon();
             // Set tooltip
-            let mut wtip: Vec<u16> = tip.encode_utf16().collect();
-            wtip.push(0);
+            let wtip = to_utf16(tip);
             let lt = wtip.len().min(nid.szTip.len());
             nid.szTip[..lt].copy_from_slice(&wtip[..lt]);
             if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
@@ -84,8 +81,8 @@ impl Tray {
     pub fn show_balloon(&mut self, title: &str, text: &str) {
         unsafe {
             self.nid.uFlags = NIF_INFO | NIF_TIP | NIF_MESSAGE | NIF_ICON;
-            let wtitle: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-            let wtext: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let wtitle = to_utf16(title);
+            let wtext = to_utf16(text);
             let lt = wtitle.len().min(self.nid.szInfoTitle.len());
             self.nid.szInfoTitle[..lt].copy_from_slice(&wtitle[..lt]);
             let li = wtext.len().min(self.nid.szInfo.len());
@@ -174,8 +171,8 @@ impl Tray {
             nid.hWnd = hwnd;
             nid.uID = TRAY_UID;
             nid.uFlags = NIF_INFO | NIF_ICON;
-            let wtitle: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-            let wtext: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let wtitle = to_utf16(title);
+            let wtext = to_utf16(text);
             let lt = wtitle.len().min(nid.szInfoTitle.len());
             nid.szInfoTitle[..lt].copy_from_slice(&wtitle[..lt]);
             let li = wtext.len().min(nid.szInfo.len());
@@ -187,7 +184,7 @@ impl Tray {
                 nid.uCallbackMessage = TRAY_MSG;
                 nid.hIcon = Self::load_app_icon();
                 let tip = "Desktop Labeler";
-                let wtip: Vec<u16> = tip.encode_utf16().chain(std::iter::once(0)).collect();
+                let wtip = to_utf16(tip);
                 let lt2 = wtip.len().min(nid.szTip.len());
                 nid.szTip[..lt2].copy_from_slice(&wtip[..lt2]);
                 let _ = Shell_NotifyIconW(NIM_ADD, &nid);
@@ -206,7 +203,7 @@ impl Tray {
             nid.uCallbackMessage = TRAY_MSG;
             nid.hIcon = Self::load_app_icon();
             let tip = "Desktop Labeler";
-            let wtip: Vec<u16> = tip.encode_utf16().chain(std::iter::once(0)).collect();
+            let wtip = to_utf16(tip);
             let lt = wtip.len().min(nid.szTip.len());
             nid.szTip[..lt].copy_from_slice(&wtip[..lt]);
             let _ = Shell_NotifyIconW(NIM_ADD, &nid);

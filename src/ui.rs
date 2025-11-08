@@ -1,3 +1,4 @@
+use crate::utils::to_utf16;
 use core::ffi::c_void;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Foundation::{LPARAM as LPARAM_T, WPARAM as WPARAM_T};
@@ -406,8 +407,4 @@ fn center_on_parent(parent: HWND, w: i32, h: i32) -> (i32, i32) {
         let cy = rc.top + ((rc.bottom - rc.top - h) / 2);
         (cx, cy)
     }
-}
-
-fn to_utf16(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
 }

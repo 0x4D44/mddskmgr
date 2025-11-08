@@ -1,3 +1,4 @@
+use crate::utils::to_utf16;
 use anyhow::{Result, anyhow};
 use once_cell::sync::OnceCell;
 use std::ffi::c_void;
@@ -16,6 +17,108 @@ use windows::Win32::UI::WindowsAndMessaging::{
     UpdateLayeredWindow,
 };
 use windows::core::{Interface, PCWSTR};
+
+/// RAII wrapper for HDC that automatically releases the DC on drop
+struct ScopedDC {
+    hdc: HDC,
+    hwnd: Option<HWND>,
+}
+
+impl ScopedDC {
+    /// Creates a scoped DC from GetDC
+    fn from_get_dc(hwnd: Option<HWND>) -> Result<Self> {
+        let hdc = unsafe { GetDC(hwnd) };
+        if hdc.0.is_null() {
+            return Err(anyhow!("GetDC failed"));
+        }
+        Ok(Self { hdc, hwnd })
+    }
+
+    /// Creates a scoped DC from CreateCompatibleDC
+    fn from_create_compatible(source: HDC) -> Result<Self> {
+        let hdc = unsafe { CreateCompatibleDC(source) };
+        if hdc.0.is_null() {
+            return Err(anyhow!("CreateCompatibleDC failed"));
+        }
+        Ok(Self { hdc, hwnd: None })
+    }
+
+    fn handle(&self) -> HDC {
+        self.hdc
+    }
+}
+
+impl Drop for ScopedDC {
+    fn drop(&mut self) {
+        unsafe {
+            if self.hwnd.is_some() {
+                // Created with GetDC, use ReleaseDC
+                let _ = ReleaseDC(self.hwnd, self.hdc);
+            } else {
+                // Created with CreateCompatibleDC, use DeleteDC
+                let _ = DeleteDC(self.hdc);
+            }
+        }
+    }
+}
+
+/// RAII wrapper for HBITMAP that automatically deletes the object on drop
+struct ScopedBitmap {
+    hbitmap: HBITMAP,
+    old_object: Option<HGDIOBJ>,
+    hdc: HDC,
+}
+
+impl ScopedBitmap {
+    fn new(hdc: HDC, hbitmap: HBITMAP) -> Self {
+        let old_object = unsafe { Some(SelectObject(hdc, HGDIOBJ(hbitmap.0))) };
+        Self {
+            hbitmap,
+            old_object,
+            hdc,
+        }
+    }
+}
+
+impl Drop for ScopedBitmap {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(old) = self.old_object {
+                SelectObject(self.hdc, old);
+            }
+            let _ = DeleteObject(HGDIOBJ(self.hbitmap.0));
+        }
+    }
+}
+
+/// RAII wrapper for HFONT that automatically deletes the object on drop
+struct ScopedFont {
+    hfont: HFONT,
+    old_object: Option<HGDIOBJ>,
+    hdc: HDC,
+}
+
+impl ScopedFont {
+    fn new(hdc: HDC, hfont: HFONT) -> Self {
+        let old_object = unsafe { Some(SelectObject(hdc, HGDIOBJ(hfont.0))) };
+        Self {
+            hfont,
+            old_object,
+            hdc,
+        }
+    }
+}
+
+impl Drop for ScopedFont {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(old) = self.old_object {
+                SelectObject(self.hdc, old);
+            }
+            let _ = DeleteObject(HGDIOBJ(self.hfont.0));
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Overlay {
@@ -118,33 +221,30 @@ impl Overlay {
         height: i32,
         pad: i32,
     ) -> Result<()> {
+        // Create device contexts with RAII wrappers for automatic cleanup
+        let screen_dc = ScopedDC::from_get_dc(None)?;
+        let mem_dc = ScopedDC::from_create_compatible(screen_dc.handle())?;
+
+        // Create top-down 32bpp DIB
+        let mut bi: BITMAPINFO = unsafe { zeroed() };
+        bi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+        bi.bmiHeader.biWidth = width;
+        bi.bmiHeader.biHeight = -height; // top-down
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB.0;
+
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let hbm =
+            unsafe { CreateDIBSection(mem_dc.handle(), &bi, DIB_RGB_COLORS, &mut bits, None, 0)? };
+
+        // RAII wrapper for bitmap - will automatically restore old object and delete bitmap
+        let _scoped_bitmap = ScopedBitmap::new(mem_dc.handle(), hbm);
+
+        // Fill background (black) — no per-pixel alpha; use global alpha in blend
+        let stride = (width * 4) as usize;
+        let total = (height as usize) * stride;
         unsafe {
-            let screen_dc = GetDC(None);
-            if screen_dc.0.is_null() {
-                return Err(anyhow!("GetDC failed"));
-            }
-            let mem_dc = CreateCompatibleDC(screen_dc);
-            if mem_dc.0.is_null() {
-                ReleaseDC(None, screen_dc);
-                return Err(anyhow!("CreateCompatibleDC failed"));
-            }
-
-            // Create top-down 32bpp DIB
-            let mut bi: BITMAPINFO = zeroed();
-            bi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
-            bi.bmiHeader.biWidth = width;
-            bi.bmiHeader.biHeight = -height; // top-down
-            bi.bmiHeader.biPlanes = 1;
-            bi.bmiHeader.biBitCount = 32;
-            bi.bmiHeader.biCompression = BI_RGB.0;
-
-            let mut bits: *mut c_void = std::ptr::null_mut();
-            let hbm = CreateDIBSection(mem_dc, &bi, DIB_RGB_COLORS, &mut bits, None, 0)?;
-            let old = SelectObject(mem_dc, HGDIOBJ(hbm.0));
-
-            // Fill background (black) — no per-pixel alpha; use global alpha in blend
-            let stride = (width * 4) as usize;
-            let total = (height as usize) * stride;
             let buf = std::slice::from_raw_parts_mut(bits as *mut u8, total);
             for y in 0..height as usize {
                 let row = &mut buf[y * stride..(y + 1) * stride];
@@ -156,25 +256,35 @@ impl Overlay {
                     px[3] = 0; // A (transparent; D2D will draw alpha)
                 }
             }
+        }
 
-            // Prefer Direct2D per-pixel alpha; fallback to GDI if it fails
-            let d2d_ok = render_d2d_with_hints(
-                mem_dc,
-                width,
-                height,
-                pad,
-                text,
-                hints,
-                &self.font_family,
-                self.font_px,
-            )
-            .is_ok();
-            if !d2d_ok {
-                let font = create_font(&self.font_family, self.font_px);
-                let old_font = SelectObject(mem_dc, HGDIOBJ(font.0));
-                SetBkMode(mem_dc, TRANSPARENT);
+        // Prefer Direct2D per-pixel alpha; fallback to GDI if it fails
+        let d2d_result = render_d2d_with_hints(
+            mem_dc.handle(),
+            width,
+            height,
+            pad,
+            text,
+            hints,
+            &self.font_family,
+            self.font_px,
+        );
+
+        let d2d_ok = d2d_result.is_ok();
+        if let Err(e) = d2d_result {
+            tracing::warn!(
+                error=?e,
+                "overlay: Direct2D rendering failed, falling back to GDI"
+            );
+
+            // Fallback to GDI rendering
+            let font = create_font(&self.font_family, self.font_px);
+            let _scoped_font = ScopedFont::new(mem_dc.handle(), font);
+
+            unsafe {
+                SetBkMode(mem_dc.handle(), TRANSPARENT);
                 let white = COLORREF(0x00FFFFFF);
-                let _ = SetTextColor(mem_dc, white);
+                let _ = SetTextColor(mem_dc.handle(), white);
                 let mut rc = RECT {
                     left: pad,
                     top: pad,
@@ -187,51 +297,57 @@ impl Overlay {
                     format!("{} {}", text, hints).encode_utf16().collect()
                 };
                 let _ = DrawTextW(
-                    mem_dc,
+                    mem_dc.handle(),
                     &mut wtext,
                     &mut rc,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
                 );
-                let _ = DeleteObject(HGDIOBJ(font.0));
-                SelectObject(mem_dc, old_font);
             }
+            // Font is automatically cleaned up by ScopedFont
+        }
 
-            // Apply a rounded window region to clip hit-testing and visuals
-            let radius = (self.font_px / 2).clamp(6, 20);
-            let hrgn = CreateRoundRectRgn(0, 0, width, height, radius * 2, radius * 2);
+        // Apply a rounded window region to clip hit-testing and visuals
+        let radius = (self.font_px / 2).clamp(6, 20);
+        let hrgn = unsafe { CreateRoundRectRgn(0, 0, width, height, radius * 2, radius * 2) };
+        unsafe {
             let _ = SetWindowRgn(self.hwnd, hrgn, true);
+        }
 
-            // Push to layered window with uniform alpha
-            let src_pt = POINT { x: 0, y: 0 };
-            let dst_pt = POINT { x, y };
-            let size = SIZE {
-                cx: width,
-                cy: height,
-            };
-            let alpha_format = if d2d_ok { 1u8 } else { 0u8 };
-            let src_const = if d2d_ok { 255u8 } else { 200u8 };
-            let blend = BLENDFUNCTION {
-                BlendOp: 0u8,
-                BlendFlags: 0u8,
-                SourceConstantAlpha: src_const,
-                AlphaFormat: alpha_format,
-            };
-            let ulw_res = UpdateLayeredWindow(
+        // Push to layered window with uniform alpha
+        let src_pt = POINT { x: 0, y: 0 };
+        let dst_pt = POINT { x, y };
+        let size = SIZE {
+            cx: width,
+            cy: height,
+        };
+        let alpha_format = if d2d_ok { 1u8 } else { 0u8 };
+        let src_const = if d2d_ok { 255u8 } else { 200u8 };
+        let blend = BLENDFUNCTION {
+            BlendOp: 0u8,
+            BlendFlags: 0u8,
+            SourceConstantAlpha: src_const,
+            AlphaFormat: alpha_format,
+        };
+
+        let ulw_res = unsafe {
+            UpdateLayeredWindow(
                 self.hwnd,
                 HDC(std::ptr::null_mut()),
                 Some(&dst_pt),
                 Some(&size),
-                mem_dc,
+                mem_dc.handle(),
                 Some(&src_pt),
                 COLORREF(0),
                 Some(&blend),
                 ULW_ALPHA,
-            );
-            if let Err(e) = &ulw_res {
-                tracing::warn!(error=?e, "overlay: UpdateLayeredWindow failed");
-            }
+            )
+        };
+        if let Err(e) = &ulw_res {
+            tracing::warn!(error=?e, "overlay: UpdateLayeredWindow failed");
+        }
 
-            // Reassert topmost after painting without activating
+        // Reassert topmost after painting without activating
+        unsafe {
             let _ = SetWindowPos(
                 self.hwnd,
                 HWND_TOPMOST,
@@ -241,13 +357,10 @@ impl Overlay {
                 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             );
-
-            // Cleanup
-            SelectObject(mem_dc, old);
-            let _ = DeleteObject(HGDIOBJ(hbm.0));
-            let _ = DeleteDC(mem_dc);
-            ReleaseDC(None, screen_dc);
         }
+
+        // All resources (screen_dc, mem_dc, bitmap, font) are automatically
+        // cleaned up by their RAII wrappers when they go out of scope
         Ok(())
     }
 
@@ -311,12 +424,6 @@ fn create_font(face: &str, px: i32) -> HFONT {
             PCWSTR(wface.as_ptr()),
         )
     }
-}
-
-fn to_utf16(s: &str) -> Vec<u16> {
-    let mut v: Vec<u16> = s.encode_utf16().collect();
-    v.push(0);
-    v
 }
 
 fn get_dwrite_factory() -> Result<&'static IDWriteFactory> {

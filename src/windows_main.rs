@@ -253,11 +253,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
     match msg {
         WM_CREATE => {
             APP.with(|slot| {
-                let (mut cfg, paths) = config::load_or_default().expect("config load");
-                if cfg.hotkeys.snap_position.key.eq_ignore_ascii_case("S") {
-                    cfg.hotkeys.snap_position.key = "L".into();
-                    let _ = config::save_atomic(&cfg, &paths);
-                }
+                let (cfg, paths) = config::load_or_default().expect("config load");
                 let overlay = Overlay::new(hwnd, &cfg.appearance.font_family, cfg.appearance.font_size_dip).expect("overlay");
                 let taskbar_created_msg = unsafe { RegisterWindowMessageW(PCWSTR(windows::core::w!("TaskbarCreated").as_wide().as_ptr())) };
                 let tray = Tray::new(hwnd, "Desktop Labeler").expect("tray");
